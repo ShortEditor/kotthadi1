@@ -13,10 +13,13 @@
             background-color: #050505;
             font-family: 'Rajdhani', sans-serif;
             user-select: none;
+            -webkit-touch-callout: none; /* iOS Safari */
+            -webkit-user-select: none; /* Safari */
         }
 
         canvas {
             display: block;
+            touch-action: none; /* Critical for mobile games */
         }
 
         #ui-layer {
@@ -141,6 +144,12 @@
         .card p { font-size: 14px; color: #ddd; margin: 0; }
 
         .hidden { display: none !important; }
+
+        /* Mobile specific adjustments */
+        @media (max-width: 768px) {
+            h1 { font-size: 40px; }
+            .hud { font-size: 18px; padding: 10px; }
+        }
     </style>
 </head>
 <body>
@@ -159,9 +168,11 @@
             <h1>NEON VOID</h1>
             <p>SURVIVE THE GEOMETRIC ONSLAUGHT</p>
             <div style="margin-bottom: 30px; text-align: left; display: inline-block;">
-                <div><span style="color:#00ffff">WASD</span> to Move</div>
-                <div><span style="color:#00ffff">MOUSE</span> to Aim</div>
-                <div><span style="color:#00ffff">CLICK</span> to Shoot</div>
+                <div style="margin-bottom: 10px;"><strong>KEYBOARD:</strong></div>
+                <div><span style="color:#00ffff">WASD</span> Move | <span style="color:#00ffff">CLICK</span> Shoot</div>
+                <br>
+                <div style="margin-bottom: 10px;"><strong>TOUCH:</strong></div>
+                <div><span style="color:#00ffff">LEFT</span> Move | <span style="color:#ff00ff">RIGHT</span> Aim & Shoot</div>
             </div>
             <br>
             <button id="start-btn">INITIATE</button>
@@ -282,7 +293,11 @@
             
             // Input
             keys: {},
-            mouse: { x: 0, y: 0, down: false }
+            mouse: { x: 0, y: 0, down: false },
+            touch: {
+                left: { id: null, active: false, origin: null, curr: null, vec: null },
+                right: { id: null, active: false, origin: null, curr: null, vec: null }
+            }
         };
 
         // --- CLASSES ---
@@ -326,11 +341,18 @@
             update() {
                 // Movement
                 let input = new Vector(0, 0);
+                
+                // Keyboard
                 if (Game.keys['w'] || Game.keys['arrowup']) input.y -= 1;
                 if (Game.keys['s'] || Game.keys['arrowdown']) input.y += 1;
                 if (Game.keys['a'] || Game.keys['arrowleft']) input.x -= 1;
                 if (Game.keys['d'] || Game.keys['arrowright']) input.x += 1;
                 
+                // Touch Joystick (Left)
+                if (Game.touch.left.active) {
+                    input.add(Game.touch.left.vec);
+                }
+
                 input.normalize();
                 input.mult(this.speed);
                 
@@ -345,13 +367,26 @@
                 this.pos.y = Math.max(this.radius, Math.min(Game.height - this.radius, this.pos.y));
 
                 // Aim
-                let dx = Game.mouse.x - this.pos.x;
-                let dy = Game.mouse.y - this.pos.y;
-                this.angle = Math.atan2(dy, dx);
+                if (Game.touch.right.active) {
+                    // Joystick Aim
+                    if(Game.touch.right.vec.mag() > 0.1) {
+                        this.angle = Math.atan2(Game.touch.right.vec.y, Game.touch.right.vec.x);
+                    }
+                } else {
+                    // Mouse Aim
+                    let dx = Game.mouse.x - this.pos.x;
+                    let dy = Game.mouse.y - this.pos.y;
+                    this.angle = Math.atan2(dy, dx);
+                }
 
                 // Shoot
                 if (this.fireTimer > 0) this.fireTimer--;
-                if (Game.mouse.down && this.fireTimer <= 0) {
+                
+                let tryingToShoot = false;
+                if (Game.mouse.down) tryingToShoot = true;
+                if (Game.touch.right.active && Game.touch.right.vec.mag() > 0.2) tryingToShoot = true;
+
+                if (tryingToShoot && this.fireTimer <= 0) {
                     this.shoot();
                 }
             }
@@ -650,6 +685,8 @@
             // Input
             window.addEventListener('keydown', e => Game.keys[e.key.toLowerCase()] = true);
             window.addEventListener('keyup', e => Game.keys[e.key.toLowerCase()] = false);
+            
+            // Mouse
             window.addEventListener('mousemove', e => {
                 Game.mouse.x = e.clientX;
                 Game.mouse.y = e.clientY;
@@ -657,10 +694,101 @@
             window.addEventListener('mousedown', () => Game.mouse.down = true);
             window.addEventListener('mouseup', () => Game.mouse.down = false);
 
+            // Touch
+            CANVAS.addEventListener('touchstart', handleTouch, {passive: false});
+            CANVAS.addEventListener('touchmove', handleTouch, {passive: false});
+            CANVAS.addEventListener('touchend', handleTouchEnd, {passive: false});
+            CANVAS.addEventListener('touchcancel', handleTouchEnd, {passive: false});
+
             document.getElementById('start-btn').addEventListener('click', startGame);
             document.getElementById('restart-btn').addEventListener('click', startGame);
 
             requestAnimationFrame(gameLoop);
+        }
+
+        // TOUCH HANDLING
+        function handleTouch(e) {
+            e.preventDefault();
+            for(let i=0; i<e.changedTouches.length; i++) {
+                let t = e.changedTouches[i];
+                let side = t.clientX < Game.width/2 ? 'left' : 'right';
+                
+                // If this is a new touch, assign it to a side if that side is free
+                if(e.type === 'touchstart') {
+                    let stick = Game.touch[side];
+                    if(!stick.active) {
+                        stick.id = t.identifier;
+                        stick.active = true;
+                        stick.origin = new Vector(t.clientX, t.clientY);
+                        stick.curr = new Vector(t.clientX, t.clientY);
+                        stick.vec = new Vector(0,0);
+                    }
+                } 
+                // Update existing touches
+                else if (e.type === 'touchmove') {
+                    // Check both sticks to see which one this touch belongs to
+                    if(Game.touch.left.active && Game.touch.left.id === t.identifier) {
+                        updateStick(Game.touch.left, t);
+                    } else if (Game.touch.right.active && Game.touch.right.id === t.identifier) {
+                        updateStick(Game.touch.right, t);
+                    }
+                }
+            }
+        }
+
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            for(let i=0; i<e.changedTouches.length; i++) {
+                let t = e.changedTouches[i];
+                if(Game.touch.left.active && Game.touch.left.id === t.identifier) {
+                    Game.touch.left.active = false;
+                }
+                if(Game.touch.right.active && Game.touch.right.id === t.identifier) {
+                    Game.touch.right.active = false;
+                }
+            }
+        }
+
+        function updateStick(stick, touch) {
+            stick.curr.x = touch.clientX;
+            stick.curr.y = touch.clientY;
+            
+            // Limit distance
+            let dx = stick.curr.x - stick.origin.x;
+            let dy = stick.curr.y - stick.origin.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            let maxDist = 60;
+            
+            if (dist > maxDist) {
+                let angle = Math.atan2(dy, dx);
+                stick.curr.x = stick.origin.x + Math.cos(angle) * maxDist;
+                stick.curr.y = stick.origin.y + Math.sin(angle) * maxDist;
+            }
+
+            // Norm Vec
+            stick.vec.x = (stick.curr.x - stick.origin.x) / maxDist;
+            stick.vec.y = (stick.curr.y - stick.origin.y) / maxDist;
+        }
+
+        function drawJoysticks() {
+            if(Game.touch.left.active) drawStick(Game.touch.left, '#00ffff');
+            if(Game.touch.right.active) drawStick(Game.touch.right, '#ff00ff');
+        }
+
+        function drawStick(stick, color) {
+            CTX.globalAlpha = 0.5;
+            // Base
+            CTX.beginPath();
+            CTX.arc(stick.origin.x, stick.origin.y, 40, 0, Math.PI*2);
+            CTX.lineWidth = 4;
+            CTX.strokeStyle = color;
+            CTX.stroke();
+            // Knob
+            CTX.beginPath();
+            CTX.arc(stick.curr.x, stick.curr.y, 20, 0, Math.PI*2);
+            CTX.fillStyle = color;
+            CTX.fill();
+            CTX.globalAlpha = 1.0;
         }
 
         function resize() {
@@ -858,6 +986,8 @@
             Game.enemies.forEach(e => e.draw(CTX));
             Game.player.draw(CTX);
             Game.popups.forEach(p => p.draw(CTX));
+            
+            drawJoysticks();
 
             if(Game.shake > 0) CTX.restore();
         }
